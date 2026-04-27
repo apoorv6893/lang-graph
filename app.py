@@ -38,7 +38,7 @@ class LoanState(TypedDict):
 # -------------------------------
 # NODE 1: AI RISK ASSESSMENT
 # -------------------------------
-def risk_node(state: LoanState):
+def risk_assessment_node(state: LoanState):
     llm = st.session_state.llm
 
     prompt = f"""
@@ -66,7 +66,6 @@ Respond in JSON:
 
     response = llm.invoke(prompt).content
 
-    # simple parse
     if "low" in response.lower():
         risk = "low"
     elif "high" in response.lower():
@@ -82,7 +81,7 @@ Respond in JSON:
 
 
 # -------------------------------
-# ROUTING LOGIC
+# ROUTING
 # -------------------------------
 def route(state: LoanState):
     if state["risk"] == "low":
@@ -110,19 +109,19 @@ def reject_node(state):
 def build_graph():
     builder = StateGraph(LoanState)
 
-    builder.add_node("risk", risk_node)
+    builder.add_node("risk_assessment", risk_assessment_node)
     builder.add_node("approve", approve_node)
     builder.add_node("reject", reject_node)
 
-    builder.set_entry_point("risk")
+    builder.set_entry_point("risk_assessment")
 
     builder.add_conditional_edges(
-        "risk",
+        "risk_assessment",
         route,
         {
             "approve": "approve",
             "reject": "reject",
-            "human": END  # pause for human
+            "human": END  # pause here
         }
     )
 
@@ -145,7 +144,7 @@ model = st.sidebar.selectbox(
 temp = st.sidebar.slider("Temperature", 0.0, 1.0, 0.2)
 
 # -------------------------------
-# INPUT FORM
+# INPUT
 # -------------------------------
 st.subheader("👤 Applicant Details")
 
@@ -157,7 +156,7 @@ loan = st.number_input("Loan Amount", value=200000)
 run = st.button("🚀 Evaluate Loan")
 
 # -------------------------------
-# RUN GRAPH
+# RUN GRAPH FIRST TIME
 # -------------------------------
 if run:
     if not api_key:
@@ -178,6 +177,7 @@ if run:
     result = graph.invoke(state)
     st.session_state.state = result
 
+
 # -------------------------------
 # DISPLAY
 # -------------------------------
@@ -193,6 +193,7 @@ if "state" in st.session_state:
     # HUMAN LOOP
     # -------------------------------
     if s.get("risk") == "medium" and s["iteration"] < 3:
+
         st.subheader("🧑‍💻 Human Review")
 
         notes = st.text_area("Reviewer Notes")
@@ -210,13 +211,14 @@ if "state" in st.session_state:
 
         with col3:
             if st.button("🔁 Re-evaluate"):
+                graph = build_graph()
+
                 new_state = {
                     **s,
                     "human_notes": notes,
                     "income_verified": verified
                 }
 
-                graph = build_graph()
                 result = graph.invoke(new_state)
                 st.session_state.state = result
                 st.rerun()
