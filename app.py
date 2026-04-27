@@ -1,6 +1,7 @@
 import streamlit as st
 from typing import TypedDict, Optional, List, Dict, Any
 import json
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 
@@ -33,9 +34,9 @@ class LoanState(TypedDict):
     # evolving
     risk: Optional[str]
     reason: Optional[str]
-    confidence: Optional[float]           # 0-1
-    gaps: Optional[List[str]]             # what’s missing
-    evidence: Optional[Dict[str, Any]]    # accumulated evidence
+    confidence: Optional[float]
+    gaps: Optional[List[str]]
+    evidence: Optional[Dict[str, Any]]
     history: List[Dict[str, Any]]
 
     # human
@@ -50,6 +51,7 @@ class LoanState(TypedDict):
     # deps
     llm: object
 
+
 # -------------------------------
 # UTIL
 # -------------------------------
@@ -58,6 +60,7 @@ def safe_json(text: str, fallback: dict):
         return json.loads(text)
     except:
         return fallback
+
 
 # -------------------------------
 # NODE: ASSESS
@@ -120,11 +123,11 @@ Return STRICT JSON:
         "iteration": state["iteration"] + 1
     }
 
+
 # -------------------------------
-# NODE: PLAN (what to fetch next)
+# NODE: PLAN
 # -------------------------------
 def plan_node(state: LoanState):
-    # pick 1-2 highest-impact gaps to resolve
     gaps = state.get("gaps", [])[:2]
     plan = {"to_fetch": gaps}
 
@@ -135,13 +138,13 @@ def plan_node(state: LoanState):
         "plan": plan
     })
 
-    return {"history": hist, "plan": plan}
+    return {"plan": plan, "history": hist}
+
 
 # -------------------------------
-# NODE: EVIDENCE (simulate tools)
+# NODE: COLLECT EVIDENCE (FIXED NAME)
 # -------------------------------
-def evidence_node(state: LoanState):
-    # Simulate fetching evidence based on plan
+def collect_evidence_node(state: LoanState):
     plan = state.get("plan", {}).get("to_fetch", [])
     ev = state.get("evidence", {}) or {}
 
@@ -149,38 +152,39 @@ def evidence_node(state: LoanState):
         if "income" in item.lower():
             ev["income_verified_flag"] = True
             ev["income_stability"] = "stable"
+
         if "bank" in item.lower():
             ev["bank_statement_summary"] = {
                 "avg_balance": 75000,
                 "overdrafts": 0
             }
+
         if "employment" in item.lower():
             ev["employment_verified"] = True
 
     hist = state.get("history", [])
     hist.append({
         "iteration": state["iteration"],
-        "stage": "evidence",
+        "stage": "collect_evidence",
         "added": plan,
         "evidence": ev
     })
 
     return {"evidence": ev, "history": hist}
 
+
 # -------------------------------
 # ROUTING
 # -------------------------------
 def route_after_assess(state: LoanState):
-    # If confident, finalize
     if state["confidence"] >= 0.75:
         return "approve" if state["risk"] == "low" else "reject"
 
-    # If not confident and can still iterate, gather more info
     if state["iteration"] < state["max_iters"]:
         return "plan"
 
-    # Otherwise escalate to human
     return "human"
+
 
 # -------------------------------
 # FINAL NODES
@@ -188,8 +192,10 @@ def route_after_assess(state: LoanState):
 def approve_node(state):
     return {"decision": "APPROVED"}
 
+
 def reject_node(state):
     return {"decision": "REJECTED"}
+
 
 # -------------------------------
 # GRAPH
@@ -199,7 +205,7 @@ def build_graph():
 
     g.add_node("assess", assess_node)
     g.add_node("plan", plan_node)
-    g.add_node("evidence", evidence_node)
+    g.add_node("collect_evidence", collect_evidence_node)  # ✅ FIXED
     g.add_node("approve", approve_node)
     g.add_node("reject", reject_node)
 
@@ -216,13 +222,14 @@ def build_graph():
         }
     )
 
-    g.add_edge("plan", "evidence")
-    g.add_edge("evidence", "assess")
+    g.add_edge("plan", "collect_evidence")
+    g.add_edge("collect_evidence", "assess")
 
     g.add_edge("approve", END)
     g.add_edge("reject", END)
 
     return g.compile()
+
 
 # -------------------------------
 # SIDEBAR
@@ -237,6 +244,7 @@ max_iters = st.sidebar.slider("Max Auto Iterations", 1, 5, 2)
 # INPUT
 # -------------------------------
 st.subheader("👤 Applicant Details")
+
 name = st.text_input("Name")
 income = st.number_input("Monthly Income", value=50000)
 credit = st.number_input("Credit Score", value=650)
@@ -270,6 +278,7 @@ if run:
     result = graph.invoke(state)
     st.session_state.state = result
 
+
 # -------------------------------
 # DISPLAY
 # -------------------------------
@@ -286,7 +295,7 @@ if "state" in st.session_state:
         st.write(h)
 
     # -------------------------------
-    # HUMAN (only if escalated)
+    # HUMAN ESCALATION
     # -------------------------------
     if not s.get("decision") and s.get("confidence", 0) < 0.75 and s["iteration"] >= s["max_iters"]:
         st.subheader("🧑‍💻 Human Review (Escalation)")
@@ -299,17 +308,15 @@ if "state" in st.session_state:
         with col1:
             if st.button("✅ Approve"):
                 st.session_state.state["decision"] = "APPROVED"
-                st.session_state.state["human_notes"] = notes
                 st.rerun()
 
         with col2:
             if st.button("❌ Reject"):
                 st.session_state.state["decision"] = "REJECTED"
-                st.session_state.state["human_notes"] = notes
                 st.rerun()
 
         with col3:
-            if st.button("🔁 Re-evaluate with Human Input"):
+            if st.button("🔁 Re-evaluate"):
                 graph = build_graph()
                 new_state = {
                     **s,
@@ -320,9 +327,6 @@ if "state" in st.session_state:
                 st.session_state.state = result
                 st.rerun()
 
-    # -------------------------------
-    # FINAL
-    # -------------------------------
     if s.get("decision"):
         st.subheader("🏁 Final Decision")
         st.success(s.get("decision"))
