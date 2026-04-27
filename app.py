@@ -1,5 +1,7 @@
 import streamlit as st
 from typing import TypedDict, Optional
+import json
+
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 
@@ -36,7 +38,7 @@ class LoanState(TypedDict):
 
 
 # -------------------------------
-# NODE 1: AI RISK ASSESSMENT
+# NODE: AI RISK ASSESSMENT
 # -------------------------------
 def risk_assessment_node(state: LoanState):
     llm = st.session_state.llm
@@ -59,23 +61,24 @@ Classify risk as:
 - medium
 - high
 
-Give short reason.
-Respond in JSON:
+Return STRICT JSON:
 {{"risk": "...", "reason": "..."}}
 """
 
     response = llm.invoke(prompt).content
 
-    if "low" in response.lower():
-        risk = "low"
-    elif "high" in response.lower():
-        risk = "high"
-    else:
+    # ✅ Proper JSON parsing
+    try:
+        parsed = json.loads(response)
+        risk = parsed.get("risk", "medium").lower()
+        reason = parsed.get("reason", response)
+    except:
         risk = "medium"
+        reason = response
 
     return {
         "risk": risk,
-        "reason": response,
+        "reason": reason,
         "iteration": state["iteration"] + 1
     }
 
@@ -121,7 +124,7 @@ def build_graph():
         {
             "approve": "approve",
             "reject": "reject",
-            "human": END  # pause here
+            "human": END  # pause for human
         }
     )
 
@@ -156,7 +159,7 @@ loan = st.number_input("Loan Amount", value=200000)
 run = st.button("🚀 Evaluate Loan")
 
 # -------------------------------
-# RUN GRAPH FIRST TIME
+# INITIAL RUN
 # -------------------------------
 if run:
     if not api_key:
@@ -192,7 +195,7 @@ if "state" in st.session_state:
     # -------------------------------
     # HUMAN LOOP
     # -------------------------------
-    if s.get("risk") == "medium" and s["iteration"] < 3:
+    if s.get("risk") == "medium" and s["iteration"] < 3 and not s.get("decision"):
 
         st.subheader("🧑‍💻 Human Review")
 
@@ -201,14 +204,21 @@ if "state" in st.session_state:
 
         col1, col2, col3 = st.columns(3)
 
+        # ✅ APPROVE (state update)
         with col1:
             if st.button("✅ Approve"):
-                st.success("Final Decision: APPROVED")
+                st.session_state.state["decision"] = "APPROVED"
+                st.session_state.state["human_notes"] = notes
+                st.rerun()
 
+        # ✅ REJECT (state update)
         with col2:
             if st.button("❌ Reject"):
-                st.error("Final Decision: REJECTED")
+                st.session_state.state["decision"] = "REJECTED"
+                st.session_state.state["human_notes"] = notes
+                st.rerun()
 
+        # ✅ LOOP (re-evaluate)
         with col3:
             if st.button("🔁 Re-evaluate"):
                 graph = build_graph()
@@ -223,6 +233,15 @@ if "state" in st.session_state:
                 st.session_state.state = result
                 st.rerun()
 
-    else:
+    # -------------------------------
+    # FINAL OUTPUT
+    # -------------------------------
+    if s.get("decision"):
         st.subheader("🏁 Final Decision")
         st.success(s.get("decision"))
+
+    # -------------------------------
+    # DEBUG STATE (POWERFUL FOR DEMO)
+    # -------------------------------
+    with st.expander("🔍 View Full State"):
+        st.json(s)
