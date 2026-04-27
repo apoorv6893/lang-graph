@@ -1,15 +1,14 @@
 import streamlit as st
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, List, Dict, Any
 import json
-
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 
 # -------------------------------
 # PAGE
 # -------------------------------
-st.set_page_config(page_title="Loan Approval - LangGraph", layout="wide")
-st.title("🏦 Loan Approval System (LangGraph Demo)")
+st.set_page_config(page_title="Loan Approval - LangGraph (Incremental Loop)", layout="wide")
+st.title("🏦 Loan Approval (LangGraph: Incremental Loop + Human-in-the-loop)")
 
 # -------------------------------
 # LLM
@@ -25,75 +24,163 @@ def get_llm(api_key, model, temp):
 # STATE
 # -------------------------------
 class LoanState(TypedDict):
+    # input
     name: str
     income: float
     credit_score: int
     loan_amount: float
+
+    # evolving
     risk: Optional[str]
     reason: Optional[str]
-    decision: Optional[str]
+    confidence: Optional[float]           # 0-1
+    gaps: Optional[List[str]]             # what’s missing
+    evidence: Optional[Dict[str, Any]]    # accumulated evidence
+    history: List[Dict[str, Any]]
+
+    # human
     human_notes: Optional[str]
     income_verified: Optional[str]
+
+    # control
     iteration: int
-    llm: object   # ✅ critical fix
+    max_iters: int
+    decision: Optional[str]
 
+    # deps
+    llm: object
 
 # -------------------------------
-# NODE: AI RISK
+# UTIL
 # -------------------------------
-def risk_assessment_node(state: LoanState):
-    llm = state["llm"]   # ✅ FIXED
+def safe_json(text: str, fallback: dict):
+    try:
+        return json.loads(text)
+    except:
+        return fallback
+
+# -------------------------------
+# NODE: ASSESS
+# -------------------------------
+def assess_node(state: LoanState):
+    llm = state["llm"]
 
     prompt = f"""
 You are a loan risk evaluator.
 
-Customer:
-Name: {state['name']}
-Income: {state['income']}
-Credit Score: {state['credit_score']}
-Loan Amount: {state['loan_amount']}
+Applicant:
+- Income: {state['income']}
+- Credit Score: {state['credit_score']}
+- Loan Amount: {state['loan_amount']}
+
+Existing Evidence:
+{state.get('evidence')}
 
 Human Inputs:
-Notes: {state.get('human_notes')}
-Income Verified: {state.get('income_verified')}
-
-Classify risk as:
-- low
-- medium
-- high
+- Notes: {state.get('human_notes')}
+- Income Verified: {state.get('income_verified')}
 
 Return STRICT JSON:
-{{"risk": "...", "reason": "..."}}
+{{
+  "risk": "low|medium|high",
+  "confidence": 0.0-1.0,
+  "reason": "...",
+  "gaps": ["missing item 1", "missing item 2"]
+}}
 """
 
-    response = llm.invoke(prompt).content
+    resp = llm.invoke(prompt).content
+    parsed = safe_json(resp, {
+        "risk": "medium",
+        "confidence": 0.4,
+        "reason": resp,
+        "gaps": ["income verification", "bank statement summary"]
+    })
 
-    try:
-        parsed = json.loads(response)
-        risk = parsed.get("risk", "medium").lower()
-        reason = parsed.get("reason", response)
-    except:
-        risk = "medium"
-        reason = response
+    risk = parsed.get("risk", "medium")
+    conf = float(parsed.get("confidence", 0.4))
+    reason = parsed.get("reason", "")
+    gaps = parsed.get("gaps", [])
+
+    hist = state.get("history", [])
+    hist.append({
+        "iteration": state["iteration"] + 1,
+        "stage": "assess",
+        "risk": risk,
+        "confidence": conf,
+        "gaps": gaps
+    })
 
     return {
         "risk": risk,
+        "confidence": conf,
         "reason": reason,
+        "gaps": gaps,
+        "history": hist,
         "iteration": state["iteration"] + 1
     }
 
+# -------------------------------
+# NODE: PLAN (what to fetch next)
+# -------------------------------
+def plan_node(state: LoanState):
+    # pick 1-2 highest-impact gaps to resolve
+    gaps = state.get("gaps", [])[:2]
+    plan = {"to_fetch": gaps}
+
+    hist = state.get("history", [])
+    hist.append({
+        "iteration": state["iteration"],
+        "stage": "plan",
+        "plan": plan
+    })
+
+    return {"history": hist, "plan": plan}
+
+# -------------------------------
+# NODE: EVIDENCE (simulate tools)
+# -------------------------------
+def evidence_node(state: LoanState):
+    # Simulate fetching evidence based on plan
+    plan = state.get("plan", {}).get("to_fetch", [])
+    ev = state.get("evidence", {}) or {}
+
+    for item in plan:
+        if "income" in item.lower():
+            ev["income_verified_flag"] = True
+            ev["income_stability"] = "stable"
+        if "bank" in item.lower():
+            ev["bank_statement_summary"] = {
+                "avg_balance": 75000,
+                "overdrafts": 0
+            }
+        if "employment" in item.lower():
+            ev["employment_verified"] = True
+
+    hist = state.get("history", [])
+    hist.append({
+        "iteration": state["iteration"],
+        "stage": "evidence",
+        "added": plan,
+        "evidence": ev
+    })
+
+    return {"evidence": ev, "history": hist}
 
 # -------------------------------
 # ROUTING
 # -------------------------------
-def route(state: LoanState):
-    if state["risk"] == "low":
-        return "approve"
-    elif state["risk"] == "high":
-        return "reject"
-    else:
-        return "human"
+def route_after_assess(state: LoanState):
+    # If confident, finalize
+    if state["confidence"] >= 0.75:
+        return "approve" if state["risk"] == "low" else "reject"
 
+    # If not confident and can still iterate, gather more info
+    if state["iteration"] < state["max_iters"]:
+        return "plan"
+
+    # Otherwise escalate to human
+    return "human"
 
 # -------------------------------
 # FINAL NODES
@@ -101,56 +188,55 @@ def route(state: LoanState):
 def approve_node(state):
     return {"decision": "APPROVED"}
 
-
 def reject_node(state):
     return {"decision": "REJECTED"}
-
 
 # -------------------------------
 # GRAPH
 # -------------------------------
 def build_graph():
-    builder = StateGraph(LoanState)
+    g = StateGraph(LoanState)
 
-    builder.add_node("risk_assessment", risk_assessment_node)
-    builder.add_node("approve", approve_node)
-    builder.add_node("reject", reject_node)
+    g.add_node("assess", assess_node)
+    g.add_node("plan", plan_node)
+    g.add_node("evidence", evidence_node)
+    g.add_node("approve", approve_node)
+    g.add_node("reject", reject_node)
 
-    builder.set_entry_point("risk_assessment")
+    g.set_entry_point("assess")
 
-    builder.add_conditional_edges(
-        "risk_assessment",
-        route,
+    g.add_conditional_edges(
+        "assess",
+        route_after_assess,
         {
             "approve": "approve",
             "reject": "reject",
+            "plan": "plan",
             "human": END
         }
     )
 
-    builder.add_edge("approve", END)
-    builder.add_edge("reject", END)
+    g.add_edge("plan", "evidence")
+    g.add_edge("evidence", "assess")
 
-    return builder.compile()
+    g.add_edge("approve", END)
+    g.add_edge("reject", END)
 
+    return g.compile()
 
 # -------------------------------
 # SIDEBAR
 # -------------------------------
 st.sidebar.header("Settings")
-
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
-model = st.sidebar.selectbox(
-    "Model",
-    ["models/gemini-2.5-flash", "models/gemini-1.5-pro"]
-)
+model = st.sidebar.selectbox("Model", ["models/gemini-2.5-flash", "models/gemini-1.5-pro"])
 temp = st.sidebar.slider("Temperature", 0.0, 1.0, 0.2)
+max_iters = st.sidebar.slider("Max Auto Iterations", 1, 5, 2)
 
 # -------------------------------
 # INPUT
 # -------------------------------
 st.subheader("👤 Applicant Details")
-
 name = st.text_input("Name")
 income = st.number_input("Monthly Income", value=50000)
 credit = st.number_input("Credit Score", value=650)
@@ -167,7 +253,6 @@ if run:
         st.stop()
 
     llm = get_llm(api_key, model, temp)
-
     graph = build_graph()
 
     state = {
@@ -176,12 +261,14 @@ if run:
         "credit_score": credit,
         "loan_amount": loan,
         "iteration": 0,
-        "llm": llm   # ✅ FIXED
+        "max_iters": max_iters,
+        "evidence": {},
+        "history": [],
+        "llm": llm
     }
 
     result = graph.invoke(state)
     st.session_state.state = result
-
 
 # -------------------------------
 # DISPLAY
@@ -189,61 +276,56 @@ if run:
 if "state" in st.session_state:
     s = st.session_state.state
 
-    st.subheader("🤖 AI Assessment")
-    st.write(f"Risk: **{s.get('risk')}**")
+    st.subheader("🤖 Current Assessment")
+    st.write(f"Risk: **{s.get('risk')}** | Confidence: **{round(s.get('confidence',0),2)}**")
     st.write(f"Reason: {s.get('reason')}")
     st.write(f"Iteration: {s.get('iteration')}")
 
-    # -------------------------------
-    # HUMAN LOOP
-    # -------------------------------
-    if s.get("risk") == "medium" and s["iteration"] < 3 and not s.get("decision"):
+    st.subheader("📜 Iteration History")
+    for h in s.get("history", []):
+        st.write(h)
 
-        st.subheader("🧑‍💻 Human Review")
+    # -------------------------------
+    # HUMAN (only if escalated)
+    # -------------------------------
+    if not s.get("decision") and s.get("confidence", 0) < 0.75 and s["iteration"] >= s["max_iters"]:
+        st.subheader("🧑‍💻 Human Review (Escalation)")
 
         notes = st.text_area("Reviewer Notes")
         verified = st.selectbox("Income Verified?", ["Yes", "No"])
 
         col1, col2, col3 = st.columns(3)
 
-        # APPROVE
         with col1:
             if st.button("✅ Approve"):
                 st.session_state.state["decision"] = "APPROVED"
                 st.session_state.state["human_notes"] = notes
                 st.rerun()
 
-        # REJECT
         with col2:
             if st.button("❌ Reject"):
                 st.session_state.state["decision"] = "REJECTED"
                 st.session_state.state["human_notes"] = notes
                 st.rerun()
 
-        # LOOP
         with col3:
-            if st.button("🔁 Re-evaluate"):
+            if st.button("🔁 Re-evaluate with Human Input"):
                 graph = build_graph()
-
                 new_state = {
                     **s,
                     "human_notes": notes,
                     "income_verified": verified
                 }
-
                 result = graph.invoke(new_state)
                 st.session_state.state = result
                 st.rerun()
 
     # -------------------------------
-    # FINAL OUTPUT
+    # FINAL
     # -------------------------------
     if s.get("decision"):
         st.subheader("🏁 Final Decision")
         st.success(s.get("decision"))
 
-    # -------------------------------
-    # DEBUG STATE
-    # -------------------------------
-    with st.expander("🔍 View Full State"):
+    with st.expander("🔍 Full State"):
         st.json(s)
