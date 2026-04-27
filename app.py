@@ -236,7 +236,7 @@ def build_graph():
 # -------------------------------
 st.sidebar.header("Settings")
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
-model = st.sidebar.selectbox("Model", ["models/gemini-2.5-flash", "models/gemini-1.5-pro"])
+model = st.sidebar.selectbox("Model", ["models/gemini-2.5-flash", "models/gemini-1.5-pro","models/gemini-2.0-flash","models/gemini-2.0-pro"])
 temp = st.sidebar.slider("Temperature", 0.0, 1.0, 0.2)
 max_iters = st.sidebar.slider("Max Auto Iterations", 1, 5, 2)
 
