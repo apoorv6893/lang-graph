@@ -35,13 +35,14 @@ class LoanState(TypedDict):
     human_notes: Optional[str]
     income_verified: Optional[str]
     iteration: int
+    llm: object   # ✅ critical fix
 
 
 # -------------------------------
-# NODE: AI RISK ASSESSMENT
+# NODE: AI RISK
 # -------------------------------
 def risk_assessment_node(state: LoanState):
-    llm = st.session_state.llm
+    llm = state["llm"]   # ✅ FIXED
 
     prompt = f"""
 You are a loan risk evaluator.
@@ -67,7 +68,6 @@ Return STRICT JSON:
 
     response = llm.invoke(prompt).content
 
-    # ✅ Proper JSON parsing
     try:
         parsed = json.loads(response)
         risk = parsed.get("risk", "medium").lower()
@@ -124,7 +124,7 @@ def build_graph():
         {
             "approve": "approve",
             "reject": "reject",
-            "human": END  # pause for human
+            "human": END
         }
     )
 
@@ -166,7 +166,8 @@ if run:
         st.error("Enter API key")
         st.stop()
 
-    st.session_state.llm = get_llm(api_key, model, temp)
+    llm = get_llm(api_key, model, temp)
+
     graph = build_graph()
 
     state = {
@@ -174,7 +175,8 @@ if run:
         "income": income,
         "credit_score": credit,
         "loan_amount": loan,
-        "iteration": 0
+        "iteration": 0,
+        "llm": llm   # ✅ FIXED
     }
 
     result = graph.invoke(state)
@@ -204,21 +206,21 @@ if "state" in st.session_state:
 
         col1, col2, col3 = st.columns(3)
 
-        # ✅ APPROVE (state update)
+        # APPROVE
         with col1:
             if st.button("✅ Approve"):
                 st.session_state.state["decision"] = "APPROVED"
                 st.session_state.state["human_notes"] = notes
                 st.rerun()
 
-        # ✅ REJECT (state update)
+        # REJECT
         with col2:
             if st.button("❌ Reject"):
                 st.session_state.state["decision"] = "REJECTED"
                 st.session_state.state["human_notes"] = notes
                 st.rerun()
 
-        # ✅ LOOP (re-evaluate)
+        # LOOP
         with col3:
             if st.button("🔁 Re-evaluate"):
                 graph = build_graph()
@@ -241,7 +243,7 @@ if "state" in st.session_state:
         st.success(s.get("decision"))
 
     # -------------------------------
-    # DEBUG STATE (POWERFUL FOR DEMO)
+    # DEBUG STATE
     # -------------------------------
     with st.expander("🔍 View Full State"):
         st.json(s)
